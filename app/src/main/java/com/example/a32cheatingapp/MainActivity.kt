@@ -1,147 +1,117 @@
-// MainActivity.kt
 package com.example.a32cheatingapp
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Text
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
+import androidx.activity.enableEdgeToEdge
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.content.PermissionChecker
+import androidx.core.content.ContextCompat
 import com.example.a32cheatingapp.ui.theme.A32CheatingAppTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.*
 import java.io.OutputStream
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
-import android.graphics.BitmapFactory
-import android.graphics.Bitmap
-import androidx.camera.core.ImageProxy.PlaneProxy
 
 class MainActivity : ComponentActivity() {
 
-    private val TAG = "SocketCamera"
     private lateinit var imageCapture: ImageCapture
+    private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private val laptopIP = "10.130.76.4" // replace with your laptop's IP
+    private val port = 12345
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
         setContent {
-            A32CheatingAppTheme {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    Text("Sending text and capturing image...")
-                }
-            }
+            A32CheatingAppTheme { /* empty UI */ }
         }
 
-        // Send text first
-        lifecycleScope.launch(Dispatchers.IO) {
-            sendHelloWorld("10.130.76.4", 12345)
+        // Send "Hello" on app launch
+        CoroutineScope(Dispatchers.IO).launch {
+            sendHelloWorld()
         }
 
-        // Check camera permission
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            startCamera()
-        } else {
-            val requestPermissionLauncher =
-                registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-                    if (granted) startCamera()
-                    else Log.e(TAG, "Camera permission denied")
-                }
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        startCamera()
     }
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
-
-            imageCapture = ImageCapture.Builder().build()
+            imageCapture = ImageCapture.Builder()
+                .setTargetResolution(android.util.Size(1080, 1440)) // lower res to speed up sending
+                .build()
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, imageCapture)
-                // Capture a single image
-                captureAndSendImage()
-            } catch (exc: Exception) {
-                Log.e(TAG, "Use case binding failed", exc)
+            cameraProvider.bindToLifecycle(this, cameraSelector, imageCapture)
+
+            // Start periodic image capture every 8 seconds
+            CoroutineScope(Dispatchers.IO).launch {
+                while (true) {
+                    delay(8000)
+                    captureAndSendImage()
+                }
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
     private fun captureAndSendImage() {
-        imageCapture.takePicture(
-            ContextCompat.getMainExecutor(this),
+        imageCapture.takePicture(ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        val jpegBytes = imageProxyToJpeg(image)
-                        sendBytes("10.130.76.4", 12345, jpegBytes)
-                        image.close()
-                        Log.d(TAG, "Image captured and sent")
+                override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
+                    println("Image captured, sending...")
+
+                    val buffer = image.planes[0].buffer
+                    val bytes = ByteArray(buffer.remaining())
+                    buffer.get(bytes)
+
+                    CoroutineScope(Dispatchers.IO).launch {
+                        sendBytes(bytes)
                     }
+
+                    image.close()
                 }
 
                 override fun onError(exception: ImageCaptureException) {
-                    Log.e(TAG, "Image capture failed", exception)
+                    println("Capture failed: ${exception.message}")
                 }
-            }
-        )
+            })
     }
 
-    private fun imageProxyToJpeg(image: ImageProxy): ByteArray {
-        val buffer: ByteBuffer = image.planes[0].buffer
-        val bytes = ByteArray(buffer.remaining())
-        buffer.get(bytes)
-        return bytes
-    }
-
-    private fun sendHelloWorld(host: String, port: Int) {
+    private fun sendHelloWorld() {
         try {
-            Socket(host, port).use { socket ->
+            Socket(laptopIP, port).use { socket ->
+                println("Sending hello to $laptopIP:$port")
                 val out: OutputStream = socket.getOutputStream()
                 val message = "Hello from Android!".toByteArray()
                 val lengthBytes = ByteBuffer.allocate(4).putInt(message.size).array()
                 out.write(lengthBytes)
                 out.write(message)
                 out.flush()
+                println("Hello sent")
             }
-            Log.d(TAG, "Hello sent")
         } catch (e: Exception) {
-            Log.e(TAG, "Socket error", e)
+            e.printStackTrace()
         }
     }
 
-    private fun sendBytes(host: String, port: Int, data: ByteArray) {
+    private fun sendBytes(bytes: ByteArray) {
         try {
-            Socket(host, port).use { socket ->
+            Socket(laptopIP, port).use { socket ->
                 val out: OutputStream = socket.getOutputStream()
-                val lengthBytes = ByteBuffer.allocate(4).putInt(data.size).array()
+                val lengthBytes = ByteBuffer.allocate(4).putInt(bytes.size).array()
                 out.write(lengthBytes)
-                out.write(data)
+                out.write(bytes)
                 out.flush()
+                println("Image sent: ${bytes.size} bytes")
             }
-            Log.d(TAG, "Bytes sent: ${data.size}")
         } catch (e: Exception) {
-            Log.e(TAG, "Socket error", e)
+            e.printStackTrace()
         }
     }
 }
