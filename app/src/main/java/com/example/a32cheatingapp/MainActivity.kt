@@ -20,20 +20,21 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var imageCapture: ImageCapture
     private val cameraExecutor = Executors.newSingleThreadExecutor()
-    private val laptopIP = "10.130.76.4" // replace with your laptop's IP
+    private val laptopIP = "10.130.76.4"
     private val port = 12345
+
+    private var isCapturing = true // controls capture loop
+    private var commandSocket: Socket? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        setContent {
-            A32CheatingAppTheme { /* empty UI */ }
-        }
+        setContent { A32CheatingAppTheme { /* empty UI */ } }
 
-        // Send "Hello" on app launch
+        // Connect to server for commands
         CoroutineScope(Dispatchers.IO).launch {
-            sendHelloWorld()
+            listenForCommands()
         }
 
         startCamera()
@@ -44,17 +45,17 @@ class MainActivity : ComponentActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
             imageCapture = ImageCapture.Builder()
-                .setTargetResolution(android.util.Size(1080, 1440)) // lower res to speed up sending
+                .setTargetResolution(android.util.Size(1080, 1440))
                 .build()
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             cameraProvider.bindToLifecycle(this, cameraSelector, imageCapture)
 
-            // Start periodic image capture every 8 seconds
+            // Start periodic capture
             CoroutineScope(Dispatchers.IO).launch {
                 while (true) {
                     delay(8000)
-                    captureAndSendImage()
+                    if (isCapturing) captureAndSendImage()
                 }
             }
         }, ContextCompat.getMainExecutor(this))
@@ -64,17 +65,13 @@ class MainActivity : ComponentActivity() {
         imageCapture.takePicture(ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
-                    println("Image captured, sending...")
-
                     val buffer = image.planes[0].buffer
                     val bytes = ByteArray(buffer.remaining())
                     buffer.get(bytes)
-
-                    CoroutineScope(Dispatchers.IO).launch {
-                        sendBytes(bytes)
-                    }
-
                     image.close()
+
+                    CoroutineScope(Dispatchers.IO).launch { sendBytes(bytes) }
+                    println("Image captured, sent ${bytes.size} bytes")
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -83,17 +80,30 @@ class MainActivity : ComponentActivity() {
             })
     }
 
-    private fun sendHelloWorld() {
+    private fun listenForCommands() {
         try {
             Socket(laptopIP, port).use { socket ->
-                println("Sending hello to $laptopIP:$port")
-                val out: OutputStream = socket.getOutputStream()
-                val message = "Hello from Android!".toByteArray()
-                val lengthBytes = ByteBuffer.allocate(4).putInt(message.size).array()
-                out.write(lengthBytes)
-                out.write(message)
-                out.flush()
-                println("Hello sent")
+                commandSocket = socket
+                val reader = socket.getInputStream()
+                val buffer = ByteArray(1024)
+
+                while (true) {
+                    val read = reader.read(buffer)
+                    if (read > 0) {
+                        val cmd = String(buffer, 0, read).trim().uppercase()
+                        when (cmd) {
+                            "PAUSE" -> {
+                                isCapturing = false
+                                println("Capture paused")
+                            }
+                            "RESUME" -> {
+                                isCapturing = true
+                                println("Capture resumed")
+                            }
+                            else -> println("Unknown command: $cmd")
+                        }
+                    }
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -103,12 +113,11 @@ class MainActivity : ComponentActivity() {
     private fun sendBytes(bytes: ByteArray) {
         try {
             Socket(laptopIP, port).use { socket ->
-                val out: OutputStream = socket.getOutputStream()
+                val out = socket.getOutputStream()
                 val lengthBytes = ByteBuffer.allocate(4).putInt(bytes.size).array()
                 out.write(lengthBytes)
                 out.write(bytes)
                 out.flush()
-                println("Image sent: ${bytes.size} bytes")
             }
         } catch (e: Exception) {
             e.printStackTrace()

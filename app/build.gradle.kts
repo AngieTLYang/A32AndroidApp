@@ -57,6 +57,8 @@ dependencies {
     implementation("androidx.camera:camera-extensions:1.3.0")
     implementation("androidx.compose.material3:material3:1.2.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.0")
+    implementation("org.java-websocket:Java-WebSocket:1.5.3")
+    implementation("androidx.activity:activity-compose:1.8.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
