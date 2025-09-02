@@ -1,6 +1,7 @@
 package com.example.a32cheatingapp
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -9,6 +10,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.example.a32cheatingapp.ui.theme.A32CheatingAppTheme
 import kotlinx.coroutines.*
 import java.io.OutputStream
@@ -21,22 +23,49 @@ class MainActivity : ComponentActivity() {
     private lateinit var imageCapture: ImageCapture
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val laptopIP = "10.130.76.4"
-    private val port = 12345
-
+    private val portImage = 12345
+    private val portText = 12346
+    @Volatile
     private var isCapturing = true
     private var commandSocket: Socket? = null
     private var imageSocket: Socket? = null
+
+    private val commandReady = CompletableDeferred<Unit>()
+    private val imageReady = CompletableDeferred<Unit>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { A32CheatingAppTheme { /* empty UI */ } }
 
-        // Connect sockets
-        CoroutineScope(Dispatchers.IO).launch { connectCommandSocket() }
-        CoroutineScope(Dispatchers.IO).launch { connectImageSocket() }
+        // Command socket coroutine
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                if (connectCommandSocket()) {
+                    if (!commandReady.isCompleted) commandReady.complete(Unit)
+                    break
+                }
+                delay(1000)
+            }
+        }
 
-        startCamera()
+        // Image socket coroutine
+        CoroutineScope(Dispatchers.IO).launch {
+            while (true) {
+                if (connectImageSocket()) {
+                    if (!imageReady.isCompleted) imageReady.complete(Unit)
+                    break
+                }
+                delay(1000)
+            }
+        }
+
+        // Wait for both sockets, then start camera
+        CoroutineScope(Dispatchers.Main).launch {
+            commandReady.await()
+            imageReady.await()
+            startCamera()
+        }
     }
 
     private fun startCamera() {
@@ -68,8 +97,10 @@ class MainActivity : ComponentActivity() {
                     buffer.get(bytes)
                     image.close()
 
-                    CoroutineScope(Dispatchers.IO).launch { sendImage(bytes) }
-                    println("Image captured, sent ${bytes.size} bytes")
+                    if (isCapturing) {
+                        CoroutineScope(Dispatchers.IO).launch { sendImage(bytes) }
+                        println("Image captured, sent ${bytes.size} bytes")
+                    }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -77,46 +108,8 @@ class MainActivity : ComponentActivity() {
                 }
             })
     }
-
-    // Persistent command socket
-    private fun connectCommandSocket() {
-        try {
-            commandSocket = Socket(laptopIP, port)
-            val reader = commandSocket!!.getInputStream()
-            val buffer = ByteArray(1024)
-            while (true) {
-                val read = reader.read(buffer)
-                if (read > 0) {
-                    val cmd = String(buffer, 0, read).trim().uppercase()
-                    when (cmd) {
-                        "PAUSE" -> {
-                            isCapturing = false
-                            println("Capture paused")
-                        }
-                        "RESUME" -> {
-                            isCapturing = true
-                            println("Capture resumed")
-                        }
-                        else -> println("Unknown command: $cmd")
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    // Persistent image socket
-    private fun connectImageSocket() {
-        try {
-            imageSocket = Socket(laptopIP, port)
-            println("Image socket connected")
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
     private fun sendImage(bytes: ByteArray) {
+        if (!isCapturing) return  // skip sending if paused
         try {
             imageSocket?.let { socket ->
                 val out: OutputStream = socket.getOutputStream()
@@ -127,6 +120,52 @@ class MainActivity : ComponentActivity() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun processCommands(socket: Socket) {
+        val reader = socket.getInputStream().bufferedReader()
+        while (true) {
+            val line = reader.readLine() ?: break
+            Log.d("ClientSocket", "Received raw command: '$line'")
+            when (line.trim().uppercase()) {
+                "PAUSE" -> {
+                    isCapturing = false
+                    Log.d("ClientSocket", "Capture paused")
+                }
+                "RESUME" -> {
+                    isCapturing = true
+                    Log.d("ClientSocket", "Capture resumed")
+                }
+                else -> Log.d("ClientSocket", "Unknown command: $line")
+            }
+        }
+    }
+    private fun connectCommandSocket(): Boolean {
+        return try {
+            Log.d("ClientSocket", "try connect Command socket")
+            commandSocket = Socket(laptopIP, portText)
+            Log.d("ClientSocket", "Command socket connected")
+            true
+        } catch (e: Exception) {
+            Log.e("ClientSocket", "Failed to connect command socket", e)
+            false
+        }
+    }
+    // Persistent image socket
+    private fun connectImageSocket(): Boolean {
+        try {
+            if (imageSocket?.isConnected == true) {
+                Log.d("ClientSocket", "Image socket already connected")
+                return true
+            }
+            Log.d("ClientSocket", "Trying to connect Image socket...")
+            imageSocket = Socket(laptopIP, portImage)
+            Log.d("ClientSocket", "Image socket connected")
+            return true
+        } catch (e: Exception) {
+            Log.e("ClientSocket", "Failed to connect image socket", e)
+            return false
         }
     }
 
