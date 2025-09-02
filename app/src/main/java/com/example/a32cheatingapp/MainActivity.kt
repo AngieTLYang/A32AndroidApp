@@ -23,19 +23,18 @@ class MainActivity : ComponentActivity() {
     private val laptopIP = "10.130.76.4"
     private val port = 12345
 
-    private var isCapturing = true // controls capture loop
+    private var isCapturing = true
     private var commandSocket: Socket? = null
+    private var imageSocket: Socket? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
         setContent { A32CheatingAppTheme { /* empty UI */ } }
 
-        // Connect to server for commands
-        CoroutineScope(Dispatchers.IO).launch {
-            listenForCommands()
-        }
+        // Connect sockets
+        CoroutineScope(Dispatchers.IO).launch { connectCommandSocket() }
+        CoroutineScope(Dispatchers.IO).launch { connectImageSocket() }
 
         startCamera()
     }
@@ -51,7 +50,6 @@ class MainActivity : ComponentActivity() {
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             cameraProvider.bindToLifecycle(this, cameraSelector, imageCapture)
 
-            // Start periodic capture
             CoroutineScope(Dispatchers.IO).launch {
                 while (true) {
                     delay(8000)
@@ -70,7 +68,7 @@ class MainActivity : ComponentActivity() {
                     buffer.get(bytes)
                     image.close()
 
-                    CoroutineScope(Dispatchers.IO).launch { sendBytes(bytes) }
+                    CoroutineScope(Dispatchers.IO).launch { sendImage(bytes) }
                     println("Image captured, sent ${bytes.size} bytes")
                 }
 
@@ -80,28 +78,26 @@ class MainActivity : ComponentActivity() {
             })
     }
 
-    private fun listenForCommands() {
+    // Persistent command socket
+    private fun connectCommandSocket() {
         try {
-            Socket(laptopIP, port).use { socket ->
-                commandSocket = socket
-                val reader = socket.getInputStream()
-                val buffer = ByteArray(1024)
-
-                while (true) {
-                    val read = reader.read(buffer)
-                    if (read > 0) {
-                        val cmd = String(buffer, 0, read).trim().uppercase()
-                        when (cmd) {
-                            "PAUSE" -> {
-                                isCapturing = false
-                                println("Capture paused")
-                            }
-                            "RESUME" -> {
-                                isCapturing = true
-                                println("Capture resumed")
-                            }
-                            else -> println("Unknown command: $cmd")
+            commandSocket = Socket(laptopIP, port)
+            val reader = commandSocket!!.getInputStream()
+            val buffer = ByteArray(1024)
+            while (true) {
+                val read = reader.read(buffer)
+                if (read > 0) {
+                    val cmd = String(buffer, 0, read).trim().uppercase()
+                    when (cmd) {
+                        "PAUSE" -> {
+                            isCapturing = false
+                            println("Capture paused")
                         }
+                        "RESUME" -> {
+                            isCapturing = true
+                            println("Capture resumed")
+                        }
+                        else -> println("Unknown command: $cmd")
                     }
                 }
             }
@@ -110,10 +106,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun sendBytes(bytes: ByteArray) {
+    // Persistent image socket
+    private fun connectImageSocket() {
         try {
-            Socket(laptopIP, port).use { socket ->
-                val out = socket.getOutputStream()
+            imageSocket = Socket(laptopIP, port)
+            println("Image socket connected")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun sendImage(bytes: ByteArray) {
+        try {
+            imageSocket?.let { socket ->
+                val out: OutputStream = socket.getOutputStream()
                 val lengthBytes = ByteBuffer.allocate(4).putInt(bytes.size).array()
                 out.write(lengthBytes)
                 out.write(bytes)
@@ -122,5 +128,11 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        commandSocket?.close()
+        imageSocket?.close()
     }
 }
