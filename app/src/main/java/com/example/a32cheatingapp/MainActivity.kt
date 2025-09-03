@@ -1,6 +1,7 @@
 package com.example.a32cheatingapp
 
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -9,6 +10,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.lifecycle.ProcessCameraProvider
+
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.a32cheatingapp.ui.theme.A32CheatingAppTheme
@@ -17,11 +19,13 @@ import java.io.OutputStream
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var imageCapture: ImageCapture
     private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private lateinit var tts: TextToSpeech
     private val laptopIP = "10.130.76.4"
     private val portImage = 12345
     private val portText = 12346
@@ -37,6 +41,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { A32CheatingAppTheme { /* empty UI */ } }
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts.language = Locale.US
+            } else {
+                Log.e("TTS", "Initialization failed")
+            }
+        }
 
         // Command socket coroutine
         lifecycleScope.launch(Dispatchers.IO) {
@@ -125,20 +136,49 @@ class MainActivity : ComponentActivity() {
 
     private fun processCommands(socket: Socket) {
         val reader = socket.getInputStream().bufferedReader()
-        while (true) {
-            val line = reader.readLine() ?: break
-            Log.d("ClientSocket", "Received raw command: '$line'")
-            when (line.trim().uppercase()) {
-                "PAUSE" -> {
-                    isCapturing = false
-                    Log.d("ClientSocket", "Capture paused")
+        try {
+            while (true) {
+                val line = reader.readLine() ?: break
+                Log.d("ClientSocket", "Received raw command: '$line'")
+                when (line.trim().uppercase()) {
+                    "PAUSE" -> {
+                        isCapturing = false
+                        Log.d("ClientSocket", "Capture paused")
+                    }
+                    else -> {
+                        // Process the text message
+                        processTextMessage(line)
+
+                        // Resume capturing
+                        isCapturing = true
+                        Log.d("ClientSocket", "Capture resumed automatically")
+
+                        // Send RESUME command back to server
+                        sendCommand("RESUME")
+                    }
                 }
-                "RESUME" -> {
-                    isCapturing = true
-                    Log.d("ClientSocket", "Capture resumed")
-                }
-                else -> Log.d("ClientSocket", "Unknown command: $line")
             }
+        } catch (e: Exception) {
+            Log.e("ClientSocket", "Error reading commands", e)
+        }
+    }
+    private fun processTextMessage(message: String) {
+        Log.d("ClientSocket", "Text message: $message")
+        // TODO: update UI, store logs, etc.
+        tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "helloWorldUtterance")
+    }
+    // Send commands/messages
+    fun sendCommand(message: String) {
+        try {
+            commandSocket?.let { socket ->
+                val writer = socket.getOutputStream().bufferedWriter()
+                writer.write(message)
+                writer.newLine()
+                writer.flush()
+                Log.d("ClientSocket", "Sent command: $message")
+            } ?: Log.e("ClientSocket", "Command socket not connected")
+        } catch (e: Exception) {
+            Log.e("ClientSocket", "Failed to send command", e)
         }
     }
     private fun connectCommandSocket(): Boolean {
@@ -146,6 +186,11 @@ class MainActivity : ComponentActivity() {
             Log.d("ClientSocket", "try connect Command socket")
             commandSocket = Socket(laptopIP, portText)
             Log.d("ClientSocket", "Command socket connected")
+            commandSocket?.let { socket ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    processCommands(socket)
+                }
+            }
             true
         } catch (e: Exception) {
             Log.e("ClientSocket", "Failed to connect command socket", e)
@@ -173,5 +218,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         commandSocket?.close()
         imageSocket?.close()
+        tts.stop()
+        tts.shutdown()
     }
 }
